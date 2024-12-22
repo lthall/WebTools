@@ -1861,6 +1861,23 @@ function redraw_freq_resp() {
 //        pred_data = pred_freq_resp.attbl_H  // attitude stability
         pred_data_coh = calc_freq_resp.bareAC_coh
         show_set = true
+    } else if (document.getElementById("type_Att1_Ctrlr").checked) {
+        calc_data = calc_freq_resp.attctrl_H
+        calc_data_coh = calc_freq_resp.attctrl_coh
+        pred_data = pred_freq_resp.attctrl_nff_H  // attitude controller without feedforward
+        pred_data_coh = calc_freq_resp.bareAC_coh
+        show_set = true
+    } else if (document.getElementById("type_Att2_Ctrlr").checked) {
+        calc_data = calc_freq_resp.DRB_H  // calculated disturbance rejection
+        calc_data_coh = calc_freq_resp.DRB_coh  // calculated disturbance rejection coherence
+        pred_data = pred_freq_resp.DRB_H  // predicted disturbance rejection
+        show_set = true
+    } else if (document.getElementById("type_Att3_Ctrlr").checked) {
+        calc_data = calc_freq_resp.attctrl_H
+        calc_data_coh = calc_freq_resp.attctrl_coh
+        pred_data = pred_freq_resp.attbl_H  // attitude stability
+        pred_data_coh = calc_freq_resp.bareAC_coh
+        show_set = true
     } else if (document.getElementById("type_Rate_Ctrlr").checked) {
         calc_data = calc_freq_resp.ratectrl_H
         calc_data_coh = calc_freq_resp.ratectrl_coh
