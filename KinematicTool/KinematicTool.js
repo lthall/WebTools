@@ -19,6 +19,7 @@ function initial_load()
     ang_pos.data = [
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg", name: 'Sqrt' },
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg", name: 'SCurve' },
+        { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg", name: 'JerkSqrt' },   // NEW
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg", name: 'Optimal' },
     ]
 
@@ -45,8 +46,10 @@ function initial_load()
     ang_vel.data = [
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s", name: 'Sqrt' },
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s", name: 'SCurve' },
+        { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s", name: 'JerkSqrt' },  // NEW
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s", name: 'Optimal' },
     ]
+
 
     ang_vel.layout = {
         legend: { itemclick: false, itemdoubleclick: false },
@@ -71,6 +74,7 @@ function initial_load()
     ang_accel.data = [
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s²", name: 'Sqrt' },
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s²", name: 'SCurve' },
+        { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s²", name: 'JerkSqrt' }, // NEW
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s²", name: 'Optimal' },
     ]
 
@@ -89,6 +93,7 @@ function initial_load()
     ang_jerk.data = [
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s³", name: 'Sqrt' },
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s³", name: 'SCurve' },
+        { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s³", name: 'JerkSqrt' }, // NEW
         { mode: 'lines', hovertemplate: "<extra></extra>%{x:.2f} s<br>%{y:.2f} deg/s³", name: 'Optimal' },
     ]
 
@@ -506,6 +511,107 @@ function updateSCurve(config, desired, state, dt)
 
 }
 
+function updateJerkSqrt(config, desired, state, dt)
+{
+    const i = state.pos.length;
+
+    // Determine jerk limit and gains consistent with your rule:
+    // p_pos = j_max/a_max and k_v = j_max/a_max
+    // In this tool we already define:
+    //   j_max = a_max / tc
+    // so p_pos = 1/tc
+    let jerkMax = Infinity;
+    let p_pos = 0.0;
+    let k_v = 0.0;
+
+    // velocity limit (can be disabled by setting <= 0)
+    const v_max = is_positive(config.vel_limit) ? config.vel_limit : Infinity;
+
+    // acceleration limit
+    const a_max = config.accel_limit;
+
+    // Compute v_cmd depending on mode
+    let v_cmd = state.vel[i-1];
+
+    if (config.mode.use_pos) {
+
+        // time constant defines jerk limit like existing SCurve implementation
+        const tc = Math.max(config.input_tc, 0.01);
+        jerkMax = a_max / tc;
+
+        p_pos = jerkMax / a_max;   // == 1/tc
+        k_v   = jerkMax / a_max;   // == 1/tc
+
+        // position error (wrapped)
+        const pos_error = wrap_PI(desired.pos - state.pos[i-1]);
+
+        // base commanded velocity from sqrt controller
+        v_cmd = sqrt_controller(pos_error, p_pos, a_max, dt);
+
+        // optional velocity feedforward (angle+rate mode)
+        if (config.mode.use_vel) {
+            v_cmd += desired.vel;
+        }
+
+    } else if (config.mode.use_vel) {
+
+        // rate mode: treat desired.vel as the velocity command and jerk-limit accel toward it
+        const tc = Math.max(config.rate_tc, 0.01);
+        jerkMax = a_max / tc;
+
+        p_pos = jerkMax / a_max;   // not used in this branch, but keep coherent
+        k_v   = jerkMax / a_max;   // == 1/tc
+
+        v_cmd = desired.vel;
+    }
+
+    // --- commanded accel/jerk implied by v_cmd (finite differences) ---
+    // Store previous command history in state (scalars, not arrays)
+    const v_cmd_prev = state.v_cmd_prev ?? v_cmd;
+    const a_cmd_prev = state.a_cmd_prev ?? 0.0;
+
+    let a_cmd = 0.0;
+    let j_cmd = 0.0;
+    if (is_positive(dt)) {
+        a_cmd = (v_cmd - v_cmd_prev) / dt;
+        j_cmd = (a_cmd - a_cmd_prev) / dt;
+    }
+
+    state.v_cmd_prev = v_cmd;
+    state.a_cmd_prev = a_cmd;
+
+    // --- desired acceleration to drive toward v_cmd + feedforward a_cmd ---
+    const v_err = v_cmd - state.vel[i-1];
+
+    let a_des = k_v * v_err;
+    a_des = constrain_float(a_des + a_cmd, -a_max, +a_max);
+
+    // Constrain a_des so the system does not accelerate further beyond v_max
+    if (v_max !== Infinity) {
+        const lo_v = Math.min(k_v * (-v_max - state.vel[i-1]), 0.0);
+        const hi_v = Math.max(k_v * ( v_max - state.vel[i-1]), 0.0);
+        a_des = constrain_float(a_des, lo_v, hi_v);
+    }
+
+    // --- jerk-limit acceleration state toward a_des ---
+    const accel_next = shape_accel(a_des, state.accel[i-1], jerkMax, dt);
+
+    // Integrate
+    const delta_pos = state.vel[i-1] * dt + accel_next * 0.5 * sq(dt);
+    state.pos[i] = wrap_PI(state.pos[i-1] + delta_pos);
+
+    const delta_vel = accel_next * dt;
+    state.vel[i] = state.vel[i-1] + delta_vel;
+
+    state.accel[i] = accel_next;
+
+    // Store jerk for plotting
+    state.jerk[i] = is_positive(dt) ? (state.accel[i] - state.accel[i-1]) / dt : 0.0;
+
+    // Optional: if you want to plot commanded jerk too, store it (not required)
+    state.jerk_cmd[i] = j_cmd;
+}
+
 // Ruckig is a time-optimal jerk limited trajectory planner
 // see: https://github.com/pantor/ruckig
 function update_ruckig(config, desired, state, dt)
@@ -640,6 +746,15 @@ async function run_attitude()
         vel: [radians(parseFloat(document.getElementById("initial_vel").value))],
         accel: [0]
     }
+    const jerkSqrtState = {
+        pos: [wrap_PI(radians(parseFloat(document.getElementById("initial_pos").value)))],
+        vel: [radians(parseFloat(document.getElementById("initial_vel").value))],
+        accel: [0],
+        jerk: [0],
+        jerk_cmd: [0],     // optional
+        v_cmd_prev: 0.0,
+        a_cmd_prev: 0.0
+    }
     const ruckigState = {
         time: [0],
         pos: [wrap_PI(radians(parseFloat(document.getElementById("initial_pos").value)))],
@@ -654,6 +769,7 @@ async function run_attitude()
 
         updateSqrtControl(config, desired, sqrtState, dt)
         updateSCurve(config, desired, SCurveState, dt)
+        updateJerkSqrt(config, desired, jerkSqrtState, dt)   // NEW
 
         // update time
         time[i] = i * dt
@@ -663,11 +779,13 @@ async function run_attitude()
             let done = false
             if (mode.use_pos) {
                 done = Math.abs(wrap_PI(desired.pos - sqrtState.pos[i])) < pos_tol &&
-                        Math.abs(wrap_PI(desired.pos - SCurveState.pos[i])) < pos_tol
+                    Math.abs(wrap_PI(desired.pos - SCurveState.pos[i])) < pos_tol &&
+                    Math.abs(wrap_PI(desired.pos - jerkSqrtState.pos[i])) < pos_tol
 
             } else if (mode.use_vel) {
                 done = Math.abs(desired.vel - sqrtState.vel[i]) < vel_tol &&
-                        Math.abs(desired.vel - SCurveState.vel[i]) < vel_tol
+                    Math.abs(desired.vel - SCurveState.vel[i]) < vel_tol &&
+                    Math.abs(desired.vel - jerkSqrtState.vel[i]) < vel_tol
             }
             if (done) {
                 done_time = time[i]
@@ -695,8 +813,10 @@ async function run_attitude()
     ang_pos.data[0].y = array_scale(sqrtState.pos, 180.0 / Math.PI)
     ang_pos.data[1].x = time
     ang_pos.data[1].y = array_scale(SCurveState.pos, 180.0 / Math.PI)
-    ang_pos.data[2].x = ruckigState.time
-    ang_pos.data[2].y = array_scale(ruckigState.pos, 180.0 / Math.PI)
+    ang_pos.data[2].x = time
+    ang_pos.data[2].y = array_scale(jerkSqrtState.pos, 180.0 / Math.PI)
+    ang_pos.data[3].x = ruckigState.time
+    ang_pos.data[3].y = array_scale(ruckigState.pos, 180.0 / Math.PI)
     ang_pos.layout.shapes[0].y0 = degrees(desired.pos)
     ang_pos.layout.shapes[0].y1 = degrees(desired.pos)
     ang_pos.layout.shapes[0].visible = mode.use_pos
@@ -706,8 +826,10 @@ async function run_attitude()
     ang_vel.data[0].y = array_scale(sqrtState.vel, 180.0 / Math.PI)
     ang_vel.data[1].x = time
     ang_vel.data[1].y = array_scale(SCurveState.vel, 180.0 / Math.PI)
-    ang_vel.data[2].x = ruckigState.time
-    ang_vel.data[2].y = array_scale(ruckigState.vel, 180.0 / Math.PI)
+    ang_vel.data[2].x = time
+    ang_vel.data[2].y = array_scale(jerkSqrtState.vel, 180.0 / Math.PI)
+    ang_vel.data[3].x = ruckigState.time
+    ang_vel.data[3].y = array_scale(ruckigState.vel, 180.0 / Math.PI)
     ang_vel.layout.shapes[0].y0 = degrees(desired.vel)
     ang_vel.layout.shapes[0].y1 = degrees(desired.vel)
     ang_vel.layout.shapes[0].visible = mode.use_vel
@@ -717,22 +839,33 @@ async function run_attitude()
     ang_accel.data[0].y = array_scale(sqrtState.accel, 180.0 / Math.PI)
     ang_accel.data[1].x = time
     ang_accel.data[1].y = array_scale(SCurveState.accel, 180.0 / Math.PI)
-    ang_accel.data[2].x = ruckigState.time
-    ang_accel.data[2].y = array_scale(ruckigState.accel, 180.0 / Math.PI)
+    ang_accel.data[2].x = time
+    ang_accel.data[2].y = array_scale(jerkSqrtState.accel, 180.0 / Math.PI)
+    ang_accel.data[3].x = ruckigState.time
+    ang_accel.data[3].y = array_scale(ruckigState.accel, 180.0 / Math.PI)
     Plotly.redraw("ang_accel")
 
     // Calculate jerk by differentiating accel
     const jerkTime = array_offset(time.slice(0, -1), dt * 0.5)
-    //const sqrtJerk = array_scale(array_sub(sqrtState.accel.slice(1), sqrtState.accel.slice(0, -1)), (1 / dt) * (180.0 / Math.PI))
+
+    // SCurve jerk by differentiating accel
     const SCurveJerk = array_scale(array_sub(SCurveState.accel.slice(1), SCurveState.accel.slice(0, -1)), (1 / dt) * (180.0 / Math.PI))
 
-    // Since sqrt controller is not jerk limited plotting it blows up the scale
-    //ang_jerk.data[0].x = jerkTime
-    //ang_jerk.data[0].y = sqrtJerk
+    // JerkSqrt jerk by differentiating accel (or use jerkSqrtState.jerk if you prefer)
+    const jerkSqrtJerk = array_scale(array_sub(jerkSqrtState.accel.slice(1), jerkSqrtState.accel.slice(0, -1)), (1 / dt) * (180.0 / Math.PI))
+
+    // Optional: keep sqrt jerk disabled if desired
+    // ang_jerk.data[0] ...
+
     ang_jerk.data[1].x = jerkTime
     ang_jerk.data[1].y = SCurveJerk
-    ang_jerk.data[2].x = ruckigState.time
-    ang_jerk.data[2].y = array_scale(ruckigState.jerk, 180.0 / Math.PI)
+
+    ang_jerk.data[2].x = jerkTime
+    ang_jerk.data[2].y = jerkSqrtJerk
+
+    ang_jerk.data[3].x = ruckigState.time
+    ang_jerk.data[3].y = array_scale(ruckigState.jerk, 180.0 / Math.PI)
+
     Plotly.redraw("ang_jerk")
 
 }
